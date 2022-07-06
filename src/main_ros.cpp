@@ -208,9 +208,9 @@ int main(int argc, char **argv)
         std::shared_ptr<dai::ImgFrame> inPassDepth = DepthQueue->tryGet<dai::ImgFrame>();
         if (inPassDepth != nullptr){
           FrameDepth = inPassDepth->getFrame();//origin 16bit data.
-	        FrameDepth8u = FrameDepth / 257;//origin 16bit -> 8bit
-	        FrameDepth8u.convertTo(FrameDepth8u, CV_8UC1);// set data type
-	        applyColorMap(FrameDepth8u, FrameDepthColor, 2);//Add colormap property for depthImg to make it has color. 2 = COLORMAP_JET, 4 = COLORMAP_RAINBOW. Note: after coverting, channel number from 1 to 3.
+	  FrameDepth8u = FrameDepth / 257;//origin 16bit -> 8bit
+	  FrameDepth8u.convertTo(FrameDepth8u, CV_8UC1);// set data type
+	  applyColorMap(FrameDepth8u, FrameDepthColor, 2);//Add colormap property for depthImg to make it has color. 2 = COLORMAP_JET, 4 = COLORMAP_RAINBOW. Note: after coverting, channel number from 1 to 3.
           header.stamp = ros::Time::now();
           if (oak_handler.get_stereo_depth){
             //cv_bridge::CvImage bridge_depth = cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_16UC1, FrameDepth);
