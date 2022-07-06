@@ -33,7 +33,8 @@ int main(int argc, char **argv)
 
   ///// obtained data
   cv::Mat FrameLeft, FrameRight, FrameDepth, FrameDepthColor, FrameRgb, FrameDetect;
-
+  cv::Mat FrameDepth8u;//temp storage coverted 8bit depth(original 16bit)
+  
   ///// for point cloud
   dai::CalibrationHandler calibData = device.readCalibration();
   oak_handler.intrinsics=calibData.getCameraIntrinsics(dai::CameraBoardSocket::RIGHT, oak_handler.depth_width, oak_handler.depth_height);
@@ -206,10 +207,16 @@ int main(int argc, char **argv)
       while(ros::ok()){
         std::shared_ptr<dai::ImgFrame> inPassDepth = DepthQueue->tryGet<dai::ImgFrame>();
         if (inPassDepth != nullptr){
-          FrameDepth = inPassDepth->getFrame();
+          FrameDepth = inPassDepth->getFrame();//origin 16bit data.
+	        FrameDepth8u = FrameDepth / 257;//origin 16bit -> 8bit
+	        FrameDepth8u.convertTo(FrameDepth8u, CV_8UC1);// set data type
+	        applyColorMap(FrameDepth8u, FrameDepthColor, 2);//Add colormap property for depthImg to make it has color. 2 = COLORMAP_JET, 4 = COLORMAP_RAINBOW. Note: after coverting, channel number from 1 to 3.
           header.stamp = ros::Time::now();
           if (oak_handler.get_stereo_depth){
-            cv_bridge::CvImage bridge_depth = cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_16UC1, FrameDepth);
+            //cv_bridge::CvImage bridge_depth = cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_16UC1, FrameDepth);
+            //bridge_depth.toImageMsg(oak_handler.depth_img_msg);
+            //oak_handler.d_pub.publish(oak_handler.depth_img_msg);
+            cv_bridge::CvImage bridge_depth = cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_8UC3, FrameDepthColor);//because colormap process, from FrameDepth8u TYPE_8UC1 to FrameDepthColor TYPE_8UC3.
             bridge_depth.toImageMsg(oak_handler.depth_img_msg);
             oak_handler.d_pub.publish(oak_handler.depth_img_msg);
           }
