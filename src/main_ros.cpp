@@ -112,8 +112,8 @@ int main(int argc, char **argv)
     yolo_thread = std::thread([&]() {
       std_msgs::Header header;
       while(ros::ok()){
-        std::shared_ptr<dai::ImgDetections> inPassNN = nNetDataQueue->tryGet<dai::ImgDetections>();
-        std::shared_ptr<dai::ImgFrame> inPassNN_img = nNetImgQueue->tryGet<dai::ImgFrame>();
+        std::shared_ptr<dai::ImgDetections> inPassNN = nNetDataQueue->get<dai::ImgDetections>();
+        std::shared_ptr<dai::ImgFrame> inPassNN_img = nNetImgQueue->get<dai::ImgFrame>();
         oakd_ros::bboxes bboxes_msg;
         if (inPassNN_img != nullptr ){
           FrameDetect = inPassNN_img->getCvFrame();
