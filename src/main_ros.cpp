@@ -250,8 +250,24 @@ int main(int argc, char **argv)
         if (inPassDepth != nullptr) {
           auto data = inPassDepth->getFirstLayerFp16();
           pcl::PointCloud<pcl::PointXYZRGBA> depth_cvt_pcl;
+          for (int i = 0; i < w; i++) {
+            for (int j = 0; j< h; j++){
+              auto temp_depth = data[i * j + 5];
+              if (temp_depth >= oak_handler.pcl_min_range and
+                  temp_depth <= oak_handler.pcl_max_range) {
+                auto p3d = pcl::PointXYZRGBA();
+                p3d.x = data[i * j +  3];
+                p3d.y = data[i * j +  4];
+                p3d.z = data[i * j +  5];
+                p3d.r = data[i * j +  0];
+                p3d.g = data[i * j +  1];
+                p3d.b = data[i * j +  2];
 
+                depth_cvt_pcl.push_back(p3d);
+            }
+          }
           // optimization (cache)
+          /*
           for (int i = 0; i < w * h; i++) {
             auto temp_depth = data[i + w * h * 5];
             if (temp_depth >= oak_handler.pcl_min_range and
@@ -266,6 +282,7 @@ int main(int argc, char **argv)
 
               depth_cvt_pcl.push_back(p3d);
             }
+            */
           }
 
           oak_handler.pcl_pub.publish(
