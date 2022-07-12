@@ -41,7 +41,7 @@ void signal_handler(sig_atomic_t s) {
 
 using namespace std;
 
-sensor_msgs::PointCloud2 cloud2msg(pcl::PointCloud<pcl::PointXYZ> cloud, std::string frame_id = "camera_link")
+sensor_msgs::PointCloud2 cloud2msg(pcl::PointCloud<pcl::PointXYZRGBA> cloud, std::string frame_id = "camera_link")
 {
   sensor_msgs::PointCloud2 cloud_ROS;
   pcl::toROSMsg(cloud, cloud_ROS);
@@ -50,7 +50,15 @@ sensor_msgs::PointCloud2 cloud2msg(pcl::PointCloud<pcl::PointXYZ> cloud, std::st
   return cloud_ROS;
 }
 
-
+template<typename T>
+std::vector<T> flatten(std::vector<std::vector<T>> const &vec)
+{
+  std::vector<T> flattened;
+  for (auto const &v: vec) {
+    flattened.insert(flattened.end(), v.begin(), v.end());
+  }
+  return flattened;
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 class oakd_ros_class{
@@ -66,13 +74,15 @@ class oakd_ros_class{
     bool initialized=false;
     bool get_imu, get_stereo_ir, get_rgb, get_stereo_depth, get_YOLO, get_pointcloud, get_raw, get_compressed;
 
-    string topic_prefix, blob_file, class_file;
+    string topic_prefix, blob_file, blob_pcl, class_file;
+    bool usb2mode;
     int fps_IMU, infer_img_width, infer_img_height, class_num, thread_num, bilateral_sigma, depth_confidence;
     double fps_rgb_yolo, fps_stereo_depth, confidence_threshold, iou_threshold, pcl_max_range, pcl_min_range;
     vector<string> class_names;
 
     // for PCL, calib data
     vector<vector<float>> intrinsics;
+
     int depth_width, depth_height;
  
     // Depth post processing
@@ -97,6 +107,7 @@ class oakd_ros_class{
       nh.param("/fps_rgb_yolo", fps_rgb_yolo, 30.0);
       nh.param("/fps_stereo_depth", fps_stereo_depth, 30.0);
       nh.param("/fps_IMU", fps_IMU, 200);
+      nh.param("/usb2mode", usb2mode, false);
 
       nh.param<bool>("/get_raw", get_raw, false);
       nh.param<bool>("/get_compressed", get_compressed, false);
@@ -126,6 +137,7 @@ class oakd_ros_class{
       nh.param("/speckleFilter_range", speckleFilter_range, 50);
       
       nh.param<std::string>("/blob_file", blob_file, "/blob_files/tiny-yolo-v4.blob");
+      nh.param<std::string>("/blob_pcl", blob_pcl, "/blob_files/pointcloud_1280x720.blob");
       nh.param<std::string>("/class_file", class_file, "/blob_files/class.txt");
       nh.param("/infer_img_width", infer_img_width, 416);
       nh.param("/infer_img_height", infer_img_height, 416);
@@ -201,7 +213,10 @@ void oakd_ros_class::main_initialize(){
     camRgb->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
     camRgb->setFps(fps_rgb_yolo);
     // camRgb->initialControl.setManualFocus(135);
-    camRgb->setPreviewSize(640, 400);
+//    camRgb->setPreviewSize(640, 400);
+    camRgb->setIspScale(2,3);
+    camRgb->setPreviewSize(1280, 720);
+
     camRgb->setInterleaved(false);
     camRgb->preview.link(xoutRgb->input);
     
@@ -239,6 +254,186 @@ void oakd_ros_class::main_initialize(){
       }
       readfile.close();
     }
+
+    if(get_stereo_ir){
+      std::shared_ptr<dai::node::MonoCamera> monoLeft     = pipeline.create<dai::node::MonoCamera>();
+      std::shared_ptr<dai::node::MonoCamera> monoRight    = pipeline.create<dai::node::MonoCamera>();
+      std::shared_ptr<dai::node::XLinkOut> xoutLeft       = pipeline.create<dai::node::XLinkOut>();
+      std::shared_ptr<dai::node::XLinkOut> xoutRight      = pipeline.create<dai::node::XLinkOut>();
+      xoutLeft->setStreamName("left");
+      xoutRight->setStreamName("right");
+
+      // monoLeft->setResolution(dai::MonoCameraProperties::SensorResolution::THE_480_P);
+      monoLeft->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
+      monoLeft->setBoardSocket(dai::CameraBoardSocket::LEFT);
+      monoLeft->setFps(fps_stereo_depth);
+      // monoRight->setResolution(dai::MonoCameraProperties::SensorResolution::THE_480_P);
+      monoRight->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
+      monoRight->setBoardSocket(dai::CameraBoardSocket::RIGHT);
+      monoRight->setFps(fps_stereo_depth);
+
+      monoLeft->out.link(xoutLeft->input);
+      monoRight->out.link(xoutRight->input);
+
+      if (get_stereo_depth || get_pointcloud){
+        std::shared_ptr<dai::node::StereoDepth> stereodepth = pipeline.create<dai::node::StereoDepth>();
+        std::shared_ptr<dai::node::XLinkOut> xoutDepth      = pipeline.create<dai::node::XLinkOut>();
+        xoutDepth->setStreamName("depth");
+
+        stereodepth->initialConfig.setConfidenceThreshold(depth_confidence);
+        stereodepth->setLeftRightCheck(true);
+        stereodepth->initialConfig.setLeftRightCheckThreshold(10);
+        stereodepth->initialConfig.setBilateralFilterSigma(bilateral_sigma);
+        stereodepth->initialConfig.setMedianFilter(dai::MedianFilter::KERNEL_7x7);
+        // stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+        stereodepth->setDepthAlign(dai::CameraBoardSocket::RGB); //default: Right
+        // stereodepth->setRectifyEdgeFillColor(0); // black, to better see the cutout
+        stereodepth->setExtendedDisparity(false);
+        stereodepth->setSubpixel(true);
+
+        dai::RawStereoDepthConfig depth_config = stereodepth->initialConfig.get();
+        if (use_spatialFilter){
+          ROS_WARN("SPATIAL FILTER");
+          depth_config.postProcessing.spatialFilter.enable = true;
+          depth_config.postProcessing.spatialFilter.holeFillingRadius = spatialFilter_holefilling_radius;
+          depth_config.postProcessing.spatialFilter.numIterations = spatialFilter_iteration_num;
+          depth_config.postProcessing.spatialFilter.alpha = spatialFilter_alpha;
+          depth_config.postProcessing.spatialFilter.delta = spatialFilter_delta;
+        }
+        if (use_temporalFilter){
+          ROS_WARN("TEMPORAL FILTER");
+          depth_config.postProcessing.temporalFilter.enable = true;
+          depth_config.postProcessing.temporalFilter.alpha = temporalFilter_alpha;
+          depth_config.postProcessing.temporalFilter.delta = temporalFilter_delta;
+          depth_config.postProcessing.temporalFilter.persistencyMode = dai::RawStereoDepthConfig::PostProcessing::TemporalFilter::PersistencyMode::VALID_2_IN_LAST_4;
+          // depth_config.postProcessing.temporalFilter.persistencyMode = dai::RawStereoDepthConfig::PostProcessing::TemporalFilter::PersistencyMode::VALID_8_OUT_OF_8;
+        }
+        if (use_speckleFilter){
+          ROS_WARN("SPECKLE FILTER");
+          depth_config.postProcessing.speckleFilter.enable = true;
+          depth_config.postProcessing.speckleFilter.speckleRange = speckleFilter_range;
+        }
+        stereodepth->initialConfig.set(depth_config);
+
+        monoLeft->out.link(stereodepth->left);
+        monoRight->out.link(stereodepth->right);
+
+        // stereodepth->syncedLeft.link(xoutLeft->input);
+        // stereodepth->syncedRight.link(xoutRight->input);
+        stereodepth->left.setBlocking(false);
+        stereodepth->right.setBlocking(false);
+        stereodepth->left.setQueueSize(1);
+        stereodepth->right.setQueueSize(1);
+        stereodepth->depth.link(xoutDepth->input);
+
+        depth_width = monoRight->getResolutionWidth();
+        depth_height= monoRight->getResolutionHeight();
+        if (get_pointcloud){
+          std::shared_ptr<dai::node::NeuralNetwork> pclNetwork = pipeline.create<dai::node::NeuralNetwork>();
+          std::shared_ptr<dai::node::XLinkOut> pclOut = pipeline.create<dai::node::XLinkOut>();
+          std::shared_ptr<dai::node::XLinkIn> cameraMatrix = pipeline.create<dai::node::XLinkIn>();
+          cameraMatrix->setStreamName("cameraMatrix");
+          pclOut->setStreamName("pcl");
+          pclNetwork->setBlobPath(path+blob_pcl);
+          pclNetwork->setNumInferenceThreads(thread_num);
+          pclNetwork->input.setBlocking(false);
+
+          cameraMatrix->out.link(pclNetwork->inputs["camera_matrix"]);
+          pclNetwork->inputs["camera_matrix"].setReusePreviousMessage(true);
+
+          stereodepth->depth.link(pclNetwork->inputs["depth"]);
+          camRgb->preview.link(pclNetwork->inputs["rgb"]);
+
+          pclNetwork->out.link(pclOut->input);
+
+        }
+
+      }
+    }
+    if(!get_stereo_ir && (get_stereo_depth || get_pointcloud)){
+      std::shared_ptr<dai::node::MonoCamera> monoLeft     = pipeline.create<dai::node::MonoCamera>();
+      std::shared_ptr<dai::node::MonoCamera> monoRight    = pipeline.create<dai::node::MonoCamera>();
+      std::shared_ptr<dai::node::StereoDepth> stereodepth = pipeline.create<dai::node::StereoDepth>();
+      std::shared_ptr<dai::node::XLinkOut> xoutDepth      = pipeline.create<dai::node::XLinkOut>();
+      xoutDepth->setStreamName("depth");
+
+      // monoLeft->setResolution(dai::MonoCameraProperties::SensorResolution::THE_480_P);
+      monoLeft->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
+      monoLeft->setBoardSocket(dai::CameraBoardSocket::LEFT);
+      monoLeft->setFps(fps_stereo_depth);
+      // monoRight->setResolution(dai::MonoCameraProperties::SensorResolution::THE_480_P);
+      monoRight->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
+      monoRight->setBoardSocket(dai::CameraBoardSocket::RIGHT);
+      monoRight->setFps(fps_stereo_depth);
+
+      stereodepth->initialConfig.setConfidenceThreshold(depth_confidence);
+      stereodepth->setLeftRightCheck(true);
+      stereodepth->initialConfig.setLeftRightCheckThreshold(10);
+      stereodepth->initialConfig.setBilateralFilterSigma(bilateral_sigma);
+      stereodepth->initialConfig.setMedianFilter(dai::MedianFilter::KERNEL_7x7);
+      // stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+      stereodepth->setDepthAlign(dai::CameraBoardSocket::RGB); //default: Right
+      // stereodepth->setRectifyEdgeFillColor(0); // black, to better see the cutout
+      stereodepth->setExtendedDisparity(false);
+      stereodepth->setSubpixel(true);
+
+      dai::RawStereoDepthConfig depth_config = stereodepth->initialConfig.get();
+      if (use_spatialFilter){
+        ROS_WARN("SPATIAL FILTER");
+        depth_config.postProcessing.spatialFilter.enable = true;
+        depth_config.postProcessing.spatialFilter.holeFillingRadius = spatialFilter_holefilling_radius;
+        depth_config.postProcessing.spatialFilter.numIterations = spatialFilter_iteration_num;
+        depth_config.postProcessing.spatialFilter.alpha = spatialFilter_alpha;
+        depth_config.postProcessing.spatialFilter.alpha = spatialFilter_alpha;
+      }
+      if (use_temporalFilter){
+        ROS_WARN("TEMPORAL FILTER");
+        depth_config.postProcessing.temporalFilter.enable = true;
+        depth_config.postProcessing.temporalFilter.alpha = temporalFilter_alpha;
+        depth_config.postProcessing.temporalFilter.delta = temporalFilter_delta;
+        depth_config.postProcessing.temporalFilter.persistencyMode = dai::RawStereoDepthConfig::PostProcessing::TemporalFilter::PersistencyMode::VALID_2_IN_LAST_4;
+        // depth_config.postProcessing.temporalFilter.persistencyMode = dai::RawStereoDepthConfig::PostProcessing::TemporalFilter::PersistencyMode::VALID_8_OUT_OF_8;
+      }
+      if (use_speckleFilter){
+        ROS_WARN("SPECKLE FILTER");
+        depth_config.postProcessing.speckleFilter.enable = true;
+        depth_config.postProcessing.speckleFilter.speckleRange = speckleFilter_range;
+      }
+      stereodepth->initialConfig.set(depth_config);
+
+      monoLeft->out.link(stereodepth->left);
+      monoRight->out.link(stereodepth->right);
+
+      stereodepth->left.setBlocking(false);
+      stereodepth->right.setBlocking(false);
+      stereodepth->left.setQueueSize(1);
+      stereodepth->right.setQueueSize(1);
+      stereodepth->depth.link(xoutDepth->input);
+
+      depth_width = monoRight->getResolutionWidth();
+      depth_height= monoRight->getResolutionHeight();
+
+      if (get_pointcloud){
+        std::shared_ptr<dai::node::NeuralNetwork> pclNetwork = pipeline.create<dai::node::NeuralNetwork>();
+        std::shared_ptr<dai::node::XLinkOut> pclOut = pipeline.create<dai::node::XLinkOut>();
+        std::shared_ptr<dai::node::XLinkIn> cameraMatrix = pipeline.create<dai::node::XLinkIn>();
+        cameraMatrix->setStreamName("cameraMatrix");
+        pclOut->setStreamName("pcl");
+        pclNetwork->setBlobPath(path+blob_pcl);
+        pclNetwork->setNumInferenceThreads(thread_num);
+        pclNetwork->input.setBlocking(false);
+
+        cameraMatrix->out.link(pclNetwork->inputs["camera_matrix"]);
+        pclNetwork->inputs["camera_matrix"].setReusePreviousMessage(true);
+
+        stereodepth->depth.link(pclNetwork->inputs["depth"]);
+        camRgb->preview.link(pclNetwork->inputs["rgb"]);
+
+        pclNetwork->out.link(pclOut->input);
+
+      }
+    }
+
   }
   if (!get_rgb && get_YOLO){
     std::shared_ptr<dai::node::ColorCamera> camRgb = pipeline.create<dai::node::ColorCamera>();
@@ -279,7 +474,7 @@ void oakd_ros_class::main_initialize(){
     readfile.close();
   }
 
-  if(get_stereo_ir){
+  if(!get_rgb && get_stereo_ir){
     std::shared_ptr<dai::node::MonoCamera> monoLeft     = pipeline.create<dai::node::MonoCamera>();
     std::shared_ptr<dai::node::MonoCamera> monoRight    = pipeline.create<dai::node::MonoCamera>();
     std::shared_ptr<dai::node::XLinkOut> xoutLeft       = pipeline.create<dai::node::XLinkOut>();
@@ -299,7 +494,7 @@ void oakd_ros_class::main_initialize(){
     monoLeft->out.link(xoutLeft->input);
     monoRight->out.link(xoutRight->input);
 
-    if (get_stereo_depth || get_pointcloud){
+    if (get_stereo_depth){
       std::shared_ptr<dai::node::StereoDepth> stereodepth = pipeline.create<dai::node::StereoDepth>();
       std::shared_ptr<dai::node::XLinkOut> xoutDepth      = pipeline.create<dai::node::XLinkOut>();
       xoutDepth->setStreamName("depth");
@@ -309,7 +504,8 @@ void oakd_ros_class::main_initialize(){
       stereodepth->initialConfig.setLeftRightCheckThreshold(10);
       stereodepth->initialConfig.setBilateralFilterSigma(bilateral_sigma);
       stereodepth->initialConfig.setMedianFilter(dai::MedianFilter::KERNEL_7x7);
-      stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+      // stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+      stereodepth->setDepthAlign(dai::CameraBoardSocket::RGB); //default: Right
       // stereodepth->setRectifyEdgeFillColor(0); // black, to better see the cutout
       stereodepth->setExtendedDisparity(false);
       stereodepth->setSubpixel(true);
@@ -353,7 +549,7 @@ void oakd_ros_class::main_initialize(){
       depth_height= monoRight->getResolutionHeight();
     }
   }
-  if(!get_stereo_ir && (get_stereo_depth || get_pointcloud)){
+  if(!get_rgb && !get_stereo_ir && get_stereo_depth){
     std::shared_ptr<dai::node::MonoCamera> monoLeft     = pipeline.create<dai::node::MonoCamera>();
     std::shared_ptr<dai::node::MonoCamera> monoRight    = pipeline.create<dai::node::MonoCamera>();
     std::shared_ptr<dai::node::StereoDepth> stereodepth = pipeline.create<dai::node::StereoDepth>();
@@ -374,7 +570,8 @@ void oakd_ros_class::main_initialize(){
     stereodepth->initialConfig.setLeftRightCheckThreshold(10);
     stereodepth->initialConfig.setBilateralFilterSigma(bilateral_sigma);
     stereodepth->initialConfig.setMedianFilter(dai::MedianFilter::KERNEL_7x7);
-    stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+    // stereodepth->setDepthAlign(dai::CameraBoardSocket::LEFT); //default: Right
+    stereodepth->setDepthAlign(dai::CameraBoardSocket::RGB); //default: Right
     // stereodepth->setRectifyEdgeFillColor(0); // black, to better see the cutout
     stereodepth->setExtendedDisparity(false);
     stereodepth->setSubpixel(true);
@@ -414,7 +611,9 @@ void oakd_ros_class::main_initialize(){
     
     depth_width = monoRight->getResolutionWidth();
     depth_height= monoRight->getResolutionHeight();
-  }
+    }
+
+
 
   initialized=true;
 }

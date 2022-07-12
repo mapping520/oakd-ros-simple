@@ -1,7 +1,9 @@
 <?xml version="1.0"?>
 <launch>
 
-  <param name="/topic_prefix" value="/oakd"/> 
+  <param name="/topic_prefix" value="/oakd"/>
+  <param name="/usb2mode" value="false"/>
+
   <param name="/fps_rgb_yolo" value="20.0"/> <!-- data rate -->
   <param name="/fps_stereo_depth" value="20.0"/> <!-- data rate -->
   <param name="/fps_IMU" value="100"/> <!-- data rate, integer -->
@@ -32,7 +34,11 @@
       <param name="/temporalFilter_alpha" value="0.4"/> <!-- 0.0: infinite filter, 1.0: non-filter--> 
       <param name="/temporalFilter_delta" value="20"/> 
   <param name="/use_speckleFilter" value="true"/> 
-      <param name="/speckleFilter_range" value="200"/> 
+      <param name="/speckleFilter_range" value="200"/>
+
+  <!-- PCL -->
+  <param name="/blob_pcl" value="/blob_files/pointcloud_1280x720.blob"/>
+
 
   <!-- IR laser, LED illuminator for PRO version -->
   <param name="/IR_laser_brightness_mA" value="0.0"/>  <!-- 0.0:Not use, 765mA at 30% duty cycle, (MAX)1200mA at 6% duty cycle -->
