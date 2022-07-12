@@ -13,7 +13,7 @@ int main(int argc, char **argv)
 
 
   ///// Generating and connecting device handler with pipeline
-  dai::Device device(oak_handler.pipeline);
+  dai::Device device(oak_handler.pipeline, oak_handler.usb2mode);
   
   while(!oak_handler.initialized){
     usleep(50000);
@@ -34,17 +34,21 @@ int main(int argc, char **argv)
   ///// obtained data
   cv::Mat FrameLeft, FrameRight, FrameDepth, FrameDepthColor, FrameRgb, FrameDetect;
   cv::Mat FrameDepth8u;//temp storage coverted 8bit depth(original 16bit)
-  
+
   ///// for point cloud
   dai::CalibrationHandler calibData = device.readCalibration();
-  oak_handler.intrinsics=calibData.getCameraIntrinsics(dai::CameraBoardSocket::RIGHT, oak_handler.depth_width, oak_handler.depth_height);
-  double fx = oak_handler.intrinsics[0][0]; double cx = oak_handler.intrinsics[0][2];
-  double fy = oak_handler.intrinsics[1][1]; double cy = oak_handler.intrinsics[1][2];
-  
-
+  oak_handler.intrinsics = calibData.getCameraIntrinsics(
+      dai::CameraBoardSocket::RIGHT, oak_handler.depth_width,
+      oak_handler.depth_height);
+  //  double fx = oak_handler.intrinsics[0][0];
+  //  double cx = oak_handler.intrinsics[0][2];
+  //  double fy = oak_handler.intrinsics[1][1];
+  //  double cy = oak_handler.intrinsics[1][2];
+  auto h = oak_handler.depth_height;
+  auto w = oak_handler.depth_width;
 
   ///// threads to get each data
-  std::thread imu_thread, rgb_thread, yolo_thread, stereo_thread, depth_pcl_thread;
+  std::thread imu_thread, rgb_thread, yolo_thread, stereo_thread, depth_thread, depth_pcl_thread;
 
   if (oak_handler.get_imu){
     std::shared_ptr<dai::DataOutputQueue> imuQueue = device.getOutputQueue("imu", 50, false);
@@ -200,9 +204,9 @@ int main(int argc, char **argv)
   }
 
 
-  if (oak_handler.get_stereo_depth || oak_handler.get_pointcloud){
+  if (oak_handler.get_stereo_depth){
     std::shared_ptr<dai::DataOutputQueue> DepthQueue = device.getOutputQueue("depth", 8, false);
-    depth_pcl_thread = std::thread([&]() {
+    depth_thread = std::thread([&]() {
       std_msgs::Header header;
       while(ros::ok()){
         std::shared_ptr<dai::ImgFrame> inPassDepth = DepthQueue->tryGet<dai::ImgFrame>();
@@ -220,22 +224,6 @@ int main(int argc, char **argv)
             bridge_depth.toImageMsg(oak_handler.depth_img_msg);
             oak_handler.d_pub.publish(oak_handler.depth_img_msg);
           }
-          if (oak_handler.get_pointcloud){
-            pcl::PointCloud<pcl::PointXYZ> depth_cvt_pcl;
-            for (int i = 0; i < FrameDepth.rows; ++i){
-              for (int j = 0; j < FrameDepth.cols; ++j){
-                float temp_depth = FrameDepth.at<ushort>(i,j);
-                if (temp_depth/1000.0 >= oak_handler.pcl_min_range and temp_depth/1000.0 <= oak_handler.pcl_max_range){
-                  pcl::PointXYZ p3d;
-                  p3d.z = (temp_depth/1000.0); //float!!! double makes error here!!! because encoding is "32FC", float
-                  p3d.x = ( j - cx ) * p3d.z / fx;
-                  p3d.y = ( i - cy ) * p3d.z / fy;
-                  depth_cvt_pcl.push_back(p3d);
-                }
-              }
-            }
-            oak_handler.pcl_pub.publish(cloud2msg(depth_cvt_pcl, oak_handler.topic_prefix+"_frame"));
-          }
         }
         std::chrono::milliseconds dura(2);
         std::this_thread::sleep_for(dura);
@@ -243,11 +231,58 @@ int main(int argc, char **argv)
     });
   }
 
+  if (oak_handler.get_pointcloud) {
+    std::shared_ptr<dai::DataOutputQueue> DepthQueue =
+        device.getOutputQueue("pcl", 8, false);
+    std::shared_ptr<dai::DataInputQueue> cameraMatrix =
+        device.getInputQueue("cameraMatrix", 8, false);
+    auto flattened = flatten(oak_handler.intrinsics);
+    vector<uint8_t> intrinsics_u8(flattened.begin(), flattened.end());
+
+    auto buff = dai::Buffer();
+
+    buff.setData(intrinsics_u8);
+    cameraMatrix->send(buff);
+    depth_pcl_thread = std::thread([&]() {
+      while (ros::ok()) {
+        std::shared_ptr<dai::NNData> inPassDepth =
+            DepthQueue->tryGet<dai::NNData>();
+        if (inPassDepth != nullptr) {
+          auto data = inPassDepth->getFirstLayerFp16();
+          pcl::PointCloud<pcl::PointXYZRGBA> depth_cvt_pcl;
+
+          // optimization (cache)
+          for (int i = 0; i < w * h; i++) {
+            auto temp_depth = data[i + w * h * 5];
+            if (temp_depth >= oak_handler.pcl_min_range and
+                temp_depth <= oak_handler.pcl_max_range) {
+              auto p3d = pcl::PointXYZRGBA();
+              p3d.x = data[i + w * h * 3];
+              p3d.y = data[i + w * h * 4];
+              p3d.z = data[i + w * h * 5];
+              p3d.r = data[i + w * h * 0];
+              p3d.g = data[i + w * h * 1];
+              p3d.b = data[i + w * h * 2];
+
+              depth_cvt_pcl.push_back(p3d);
+            }
+          }
+
+          oak_handler.pcl_pub.publish(
+              cloud2msg(depth_cvt_pcl, oak_handler.topic_prefix + "_frame"));
+        }
+
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
+      }
+    });
+  }
 
   imu_thread.join();
   rgb_thread.join();
   yolo_thread.join();
   stereo_thread.join();
+  depth_thread.join();
   depth_pcl_thread.join();
 
   ros::spin();
