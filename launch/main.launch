@@ -2,9 +2,12 @@
 <launch>
 
   <param name="/topic_prefix" value="/oakd"/> 
-  <param name="/fps_rgb_yolo" value="20.0"/> <!-- data rate -->
-  <param name="/fps_stereo_depth" value="20.0"/> <!-- data rate -->
-  <param name="/fps_IMU" value="100"/> <!-- data rate, integer -->
+  <param name="/fps_rgb_yolo" value="20.0"/> <!-- rgb and yolo data rate -->
+  <param name="/fps_stereo_depth" value="20.0"/> <!-- stereo data rate -->
+  <param name="/fps_IMU" value="100"/> <!-- imu data rate, integer -->
+  <param name="/rgb_width" value="1080"/> <!-- rgb width-->
+  <param name="/rgb_height" value="720"/> <!-- rgb height-->
+  <param name="/StereoResolution" value="THE_400_P"/> <!-- Stereo Resolution:THE_400_P,THE_480_P,THE_720_P,THE_800_P-->
 
   <!-- image type - getting raw and compressed both is possible -->
   <param name="/get_raw" value="false"/> 
