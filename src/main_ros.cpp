@@ -202,12 +202,15 @@ int main(int argc, char **argv)
 
   if (oak_handler.get_stereo_depth || oak_handler.get_pointcloud){
     std::shared_ptr<dai::DataOutputQueue> DepthQueue = device.getOutputQueue("depth", 8, false);
+    std::shared_ptr<dai::DataOutputQueue> rgbQueue = device.getOutputQueue("rgb", 8, false);	
     depth_pcl_thread = std::thread([&]() {
       std_msgs::Header header;
       while(ros::ok()){
         std::shared_ptr<dai::ImgFrame> inPassDepth = DepthQueue->tryGet<dai::ImgFrame>();
-        if (inPassDepth != nullptr){
+	std::shared_ptr<dai::ImgFrame> inPassRgb = rgbQueue->tryGet<dai::ImgFrame>();
+        if (inPassDepth != nullptr && inPassRgb != nullptr){
           FrameDepth = inPassDepth->getFrame();//origin 16bit data.
+	  FrameRgb = inPassRgb->getCvFrame();// b g r.
 	  FrameDepth8u = FrameDepth / 257;//origin 16bit -> 8bit
 	  FrameDepth8u.convertTo(FrameDepth8u, CV_8UC1);// set data type
 	  applyColorMap(FrameDepth8u, FrameDepthColor, 2);//Add colormap property for depthImg to make it has color. 2 = COLORMAP_JET, 4 = COLORMAP_RAINBOW. Note: after coverting, channel number from 1 to 3.
@@ -221,15 +224,20 @@ int main(int argc, char **argv)
             oak_handler.d_pub.publish(oak_handler.depth_img_msg);
           }
           if (oak_handler.get_pointcloud){
-            pcl::PointCloud<pcl::PointXYZ> depth_cvt_pcl;
+            pcl::PointCloud<pcl::PointXYZRGBA> depth_cvt_pcl;
             for (int i = 0; i < FrameDepth.rows; ++i){
               for (int j = 0; j < FrameDepth.cols; ++j){
                 float temp_depth = FrameDepth.at<ushort>(i,j);
                 if (temp_depth/1000.0 >= oak_handler.pcl_min_range and temp_depth/1000.0 <= oak_handler.pcl_max_range){
-                  pcl::PointXYZ p3d;
+                  pcl::PointXYZRGBA p3d;
                   p3d.z = (temp_depth/1000.0); //float!!! double makes error here!!! because encoding is "32FC", float
                   p3d.x = ( j - cx ) * p3d.z / fx;
                   p3d.y = ( i - cy ) * p3d.z / fy;
+		  if((FrameRgb.cols == FrameDepth.cols) && (FrameRgb.rows == FrameDepth.rows)) {
+                      p3d.r = FrameRgb.ptr<uchar>(i)[j * 3 + 2];//add
+                      p3d.g = FrameRgb.ptr<uchar>(i)[j * 3 + 1];//add
+                      p3d.b = FrameRgb.ptr<uchar>(i)[j * 3];//add
+                  }
                   depth_cvt_pcl.push_back(p3d);
                 }
               }
